@@ -1,0 +1,32 @@
+# Build context is the repo root (npm workspaces share one package-lock.json),
+# so keep everything the images don't need out of it.
+
+# Dependencies and build output (rebuilt inside the image)
+**/node_modules
+**/dist
+**/build
+**/coverage
+
+# VCS, CI, editors
+.git
+.github
+.vscode
+.idea
+**/.DS_Store
+
+# Secrets / local env files must never enter an image
+**/.env
+**/.env.*
+!**/.env.example
+
+# Infrastructure and docs are not part of any image
+infra
+deploy
+docs
+*.md
+**/Dockerfile
+**/*.dockerignore
+docker-compose*.yml
+
+# Logs
+**/npm-debug.log*
