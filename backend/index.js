@@ -16,9 +16,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// The schema is managed by migrations (sequelize-cli db:migrate, run once per deploy),
+// not by sync(): every replica altering the schema at startup races and is unsafe in prod.
 (async () => {
   try {
-    await sequelize.sync({ alter: true });
+    await sequelize.authenticate();
     console.log(`Connection with ${env} database has been established.`);
   } catch (error) {
     console.error("Unable to connect to the database:", error);
@@ -30,6 +32,30 @@ if (process.env.NODE_ENV === "production") {
 } else {
   app.get("/", (req, res) => res.json({ status: "API is running on /api" }));
 }
+// Health checks. Liveness never touches the DB: a short DB outage (e.g. RDS Multi-AZ failover)
+// must not restart every pod. Readiness (also the ALB health check) takes the pod out of traffic
+// while the DB is unreachable or the pod is shutting down.
+let shuttingDown = false;
+
+app.get("/api/health/live", (req, res) => res.json({ status: "ok" }));
+
+app.get("/api/health/ready", async (req, res) => {
+  if (shuttingDown) {
+    return res.status(503).json({ status: "shutting down" });
+  }
+  try {
+    await Promise.race([
+      sequelize.query("SELECT 1"),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("timeout")), 2000),
+      ),
+    ]);
+    res.json({ status: "ok" });
+  } catch (error) {
+    res.status(503).json({ status: "database unavailable" });
+  }
+});
+
 app.use("/api/users", usersRoutes);
 app.use("/api/user", userRoutes);
 app.use("/api/articles", articlesRoutes);
@@ -40,6 +66,28 @@ app.get("/*any", (req, res) =>
 );
 app.use(errorHandler);
 
-app.listen(PORT, () =>
+const server = app.listen(PORT, () =>
   console.log(`Server running on http://localhost:${PORT}`),
 );
+
+// Graceful shutdown (SIGTERM from Kubernetes, forwarded by tini): fail readiness, stop accepting
+// new connections, let in-flight requests finish, close the DB pool, exit before the grace period.
+const shutdown = (signal) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received, shutting down gracefully`);
+
+  server.close(async () => {
+    await sequelize.close();
+    console.log("HTTP server and DB pool closed");
+    process.exit(0);
+  });
+
+  setTimeout(() => {
+    console.error("Graceful shutdown timed out, forcing exit");
+    process.exit(1);
+  }, 25000).unref();
+};
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

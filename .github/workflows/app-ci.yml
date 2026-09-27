@@ -1,0 +1,96 @@
+name: App CI
+
+# Reusable pipeline for one app (backend or frontend), called by backend.yml / frontend.yml.
+# Triggers and path filters live in the callers.
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: App folder and image name (backend or frontend)
+        required: true
+        type: string
+      environment:
+        description: Target environment, used in the ECR repository name (e.g. prod, dev)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 003636669641.dkr.ecr.us-east-1.amazonaws.com
+  IMAGE: 003636669641.dkr.ecr.us-east-1.amazonaws.com/hw-${{ inputs.app }}-${{ inputs.environment }}
+  # Not a secret: only workflows on main of this repo can assume it (trust policy in Terraform)
+  AWS_ROLE_ARN: arn:aws:iam::003636669641:role/hw-github-actions-ecr
+
+# Third-party actions are pinned to verified commit SHAs (tags can be moved by an attacker)
+jobs:
+  secret-scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npx vitest run "${{ inputs.app }}"
+
+  build:
+    needs: [secret-scan, test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC token for AWS (the role only trusts main)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Image tag (short git SHA)
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ inputs.app }}/Dockerfile
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}
+          load: true
+          push: false
+          cache-from: type=gha,scope=${{ inputs.app }}-${{ inputs.environment }}
+          cache-to: type=gha,scope=${{ inputs.app }}-${{ inputs.environment }},mode=max
+
+      - name: Vulnerability scan (fail on fixable CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ env.TAG }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: AWS credentials (OIDC, main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Push to ECR (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+          docker push "$IMAGE:$TAG"
+          echo "Pushed $IMAGE:$TAG" >> "$GITHUB_STEP_SUMMARY"

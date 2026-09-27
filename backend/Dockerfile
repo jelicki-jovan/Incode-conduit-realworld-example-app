@@ -29,6 +29,13 @@ RUN apk add --no-cache tini
 ENV NODE_ENV=production \
     PORT=3001
 
+# RDS CA bundle (public) for verifying the database's TLS certificate (PROD_DB_SSL_CA).
+# Pinned by checksum: if AWS updates the bundle, the build fails until the checksum is bumped.
+# Directory created first: ADD from a URL would create it root-only, unreadable for the app user.
+RUN mkdir -m 0755 -p /app/certs
+ADD --checksum=sha256:b1711d12bae51838581281e23b6cb97b1074016873b4dafc80ed14002462dd77 --chmod=644 \
+    https://truststore.pki.rds.amazonaws.com/us-east-1/us-east-1-bundle.pem /app/certs/rds-us-east-1.pem
+
 WORKDIR /app
 COPY --from=deps --chown=root:root /app/node_modules ./node_modules
 COPY --chown=root:root package.json ./

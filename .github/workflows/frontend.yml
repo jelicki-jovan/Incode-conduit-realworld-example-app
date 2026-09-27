@@ -1,0 +1,39 @@
+name: Frontend
+
+on:
+  pull_request:
+    paths:
+      - "frontend/**"
+      - "package.json"
+      - "package-lock.json"
+      - "vitest.config.js"
+      - ".github/workflows/frontend.yml"
+      - ".github/workflows/app-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "frontend/**"
+      - "package.json"
+      - "package-lock.json"
+      - "vitest.config.js"
+      - ".github/workflows/frontend.yml"
+      - ".github/workflows/app-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    uses: ./.github/workflows/app-ci.yml
+    with:
+      app: frontend
+      environment: prod
+    # Upper bound for the called workflow: its build job needs id-token to get AWS credentials
+    permissions:
+      contents: read
+      id-token: write
