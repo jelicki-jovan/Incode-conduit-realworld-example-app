@@ -1,0 +1,72 @@
+name: Deploy to k8s-envs
+description: >
+  GitOps deploy: set the app's image tag in the k8s-envs repo
+  (environments/<environment>/overlays/<app>/kustomization.yml), commit and push.
+  ArgoCD picks up the commit and rolls out the new image.
+
+inputs:
+  app:
+    description: App name (backend or frontend)
+    required: true
+  environment:
+    description: Target environment (e.g. prod)
+    required: true
+  image-tag:
+    description: Image tag to deploy (pushed to ECR by the CI job)
+    required: true
+  deploy-key:
+    description: SSH deploy key with write access to the k8s-envs repo
+    required: true
+  repository:
+    description: GitOps repository
+    required: false
+    default: jelicki-jovan/k8s-envs
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout k8s-envs
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: ${{ inputs.repository }}
+        ssh-key: ${{ inputs.deploy-key }}
+        path: k8s-envs
+
+    - name: Set image tag, commit and push
+      shell: bash
+      working-directory: k8s-envs
+      env:
+        APP: ${{ inputs.app }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        TAG: ${{ inputs.image-tag }}
+        SOURCE: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+      run: |
+        set -euo pipefail
+        file="environments/${ENVIRONMENT}/overlays/${APP}/kustomization.yml"
+
+        # Edit only the newTag line (kustomize edit would rewrite the file and drop comments)
+        [ "$(grep -cE '^\s*newTag:' "$file")" = "1" ] || { echo "::error::expected exactly one newTag line in $file"; exit 1; }
+        sed -i -E "s/^(\s*newTag:\s*).*/\1${TAG}/" "$file"
+
+        if git diff --quiet; then
+          echo "$APP/$ENVIRONMENT already at $TAG, nothing to deploy" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git commit -am "deploy(${APP}): ${ENVIRONMENT} ${TAG}" -m "Source: ${SOURCE}"
+        branch=$(git rev-parse --abbrev-ref HEAD)
+
+        # Backend and frontend may deploy at the same time: rebase and retry on a rejected push
+        for attempt in 1 2 3 4 5; do
+          if git push origin "HEAD:${branch}"; then
+            echo "Deployed ${APP} ${TAG} to ${ENVIRONMENT} ($(git rev-parse --short HEAD) in k8s-envs)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Push rejected (attempt ${attempt}), rebasing on the latest k8s-envs"
+          sleep $((attempt * 2))
+          git pull --rebase origin "${branch}"
+        done
+        echo "::error::could not push to k8s-envs after 5 attempts"
+        exit 1

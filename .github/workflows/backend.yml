@@ -9,6 +9,7 @@ on:
       - "vitest.config.js"
       - ".github/workflows/backend.yml"
       - ".github/workflows/app-ci.yml"
+      - ".github/actions/**"
   push:
     branches:
       - main
@@ -19,6 +20,7 @@ on:
       - "vitest.config.js"
       - ".github/workflows/backend.yml"
       - ".github/workflows/app-ci.yml"
+      - ".github/actions/**"
 
 permissions:
   contents: read
@@ -37,3 +39,23 @@ jobs:
     permissions:
       contents: read
       id-token: write
+
+  # GitOps deploy: bump the image tag in k8s-envs; ArgoCD rolls it out
+  deploy:
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    # One k8s-envs push at a time across apps (backend + frontend may finish together)
+    concurrency:
+      group: deploy-k8s-envs-prod
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/deploy-k8s-envs
+        with:
+          app: backend
+          environment: prod
+          image-tag: ${{ needs.ci.outputs.image-tag }}
+          deploy-key: ${{ secrets.K8S_ENVS_DEPLOY_KEY }}

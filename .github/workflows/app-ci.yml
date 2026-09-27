@@ -13,6 +13,10 @@ on:
         description: Target environment, used in the ECR repository name (e.g. prod, dev)
         required: true
         type: string
+    outputs:
+      image-tag:
+        description: Image tag built and (on main) pushed to ECR
+        value: ${{ jobs.build.outputs.image-tag }}
 
 permissions:
   contents: read
@@ -53,11 +57,16 @@ jobs:
     permissions:
       contents: read
       id-token: write # GitHub OIDC token for AWS (the role only trusts main)
+    outputs:
+      image-tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Image tag (short git SHA)
-        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+        id: tag
+        run: |
+          echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
