@@ -26,6 +26,11 @@ FROM ${NODE_IMAGE} AS runtime
 # so Kubernetes rollouts stop the container gracefully instead of waiting for SIGKILL.
 RUN apk add --no-cache tini
 
+# The app (and the migration CLI) run with plain `node`: npm/npx/corepack aren't needed at runtime.
+# Removing them drops their vulnerable bundled dependencies and reduces the attack surface.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+      /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
+
 ENV NODE_ENV=production \
     PORT=3001
 
