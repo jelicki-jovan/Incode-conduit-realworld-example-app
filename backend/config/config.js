@@ -14,6 +14,30 @@ const prodSsl =
       }
     : {};
 
+// IAM database authentication (PROD_DB_IAM_AUTH=true, only the running app; migrations use the
+// master password): no password, a 15-min token is signed with the pod's IAM role (IRSA) before
+// every NEW connection. Signing is local (no AWS call per connection); pooled connections stay open
+// after the token expires, it's only checked at login. Needs TLS (above).
+const prodIamAuth =
+  process.env.PROD_DB_IAM_AUTH === "true"
+    ? (() => {
+        const { Signer } = require("@aws-sdk/rds-signer");
+        const signer = new Signer({
+          hostname: process.env.PROD_DB_HOSTNAME,
+          port: 5432,
+          username: process.env.PROD_DB_USERNAME,
+          region: process.env.AWS_REGION,
+        });
+        return {
+          hooks: {
+            beforeConnect: async (connectionConfig) => {
+              connectionConfig.password = await signer.getAuthToken();
+            },
+          },
+        };
+      })()
+    : {};
+
 /** @type {import('sequelize').Options} */
 module.exports = {
   development: {
@@ -41,5 +65,6 @@ module.exports = {
     // env vars are strings: "false" would be truthy and log every SQL query
     logging: process.env.PROD_DB_LOGGING === "true" ? console.log : false,
     dialectOptions: prodSsl,
+    ...prodIamAuth,
   },
 };
