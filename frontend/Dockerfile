@@ -21,6 +21,11 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY frontend/ ./frontend/
 RUN npm run build --workspace frontend
 
+# Version (git commit SHA) baked in by CI, served as /version.json: shows which build is running.
+# After the build so a new SHA doesn't invalidate the cached npm/build layers.
+ARG APP_VERSION=unknown
+RUN printf '{"version":"%s"}\n' "$APP_VERSION" > frontend/dist/version.json
+
 # ---- runtime: only the static files + nginx, no Node.js at all ----
 FROM ${NGINX_IMAGE} AS runtime
 

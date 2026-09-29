@@ -76,6 +76,7 @@ jobs:
           context: .
           file: ${{ inputs.app }}/Dockerfile
           tags: ${{ env.IMAGE }}:${{ env.TAG }}
+          build-args: APP_VERSION=${{ env.TAG }}
           load: true
           push: false
           cache-from: type=gha,scope=${{ inputs.app }}-${{ inputs.environment }}

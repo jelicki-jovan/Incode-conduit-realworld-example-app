@@ -33,11 +33,14 @@ if (process.env.NODE_ENV === "production") {
   app.get("/", (req, res) => res.json({ status: "API is running on /api" }));
 }
 // Health checks. Liveness never touches the DB: a short DB outage (e.g. RDS Multi-AZ failover)
-// must not restart every pod. Readiness (also the ALB health check) takes the pod out of traffic
+// must not restart every pod. Readiness takes the pod out of the Service (and so out of traffic)
 // while the DB is unreachable or the pod is shutting down.
 let shuttingDown = false;
 
-app.get("/api/health/live", (req, res) => res.json({ status: "ok" }));
+// version: the image's git commit SHA (set at build time), so a deploy can be verified from outside
+app.get("/api/health/live", (req, res) =>
+  res.json({ status: "ok", version: process.env.APP_VERSION || "unknown" }),
+);
 
 app.get("/api/health/ready", async (req, res) => {
   if (shuttingDown) {

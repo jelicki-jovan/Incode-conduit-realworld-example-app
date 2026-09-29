@@ -30,27 +30,59 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Build ONCE (into the dev ECR repository); prod later gets this exact image
   ci:
     uses: ./.github/workflows/app-ci.yml
     with:
       app: backend
-      environment: prod
+      environment: dev
     # Upper bound for the called workflow: its build job needs id-token to get AWS credentials
     permissions:
       contents: read
       id-token: write
 
-  # GitOps deploy: bump the image tag in k8s-envs; ArgoCD rolls it out
-  deploy:
+  # Every merge to main is deployed to dev first: bump the dev image tag in k8s-envs, Argo CD rolls it out
+  deploy-dev:
     needs: ci
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    # One k8s-envs push at a time across apps (backend + frontend may finish together)
-    concurrency:
-      group: deploy-k8s-envs-prod
-      cancel-in-progress: false
+    # No concurrency group: with 4 deploy jobs, GitHub would cancel waiting ones (max 1 pending per group).
+    # Simultaneous k8s-envs pushes are handled by the action itself (rebase + retry).
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/deploy-k8s-envs
+        with:
+          app: backend
+          environment: dev
+          image-tag: ${{ needs.ci.outputs.image-tag }}
+          deploy-key: ${{ secrets.K8S_ENVS_DEPLOY_KEY }}
+
+  # Promotion: copy the SAME image (same digest) from the dev to the prod repository, no rebuild
+  promote-prod:
+    needs: [ci, deploy-dev]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC token for AWS (the role only trusts main)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/promote-image
+        with:
+          app: backend
+          from-environment: dev
+          to-environment: prod
+          image-tag: ${{ needs.ci.outputs.image-tag }}
+
+  # GitOps deploy to prod: bump the prod image tag in k8s-envs, Argo CD rolls it out
+  deploy-prod:
+    needs: [ci, promote-prod]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/deploy-k8s-envs

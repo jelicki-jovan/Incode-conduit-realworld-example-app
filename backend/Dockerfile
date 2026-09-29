@@ -51,6 +51,11 @@ COPY --chown=root:root backend/ ./backend/
 USER 1000:1000
 WORKDIR /app/backend
 
+# Version (git commit SHA) baked in by CI, returned by /api/health/live: shows which build is running.
+# Declared last so a new SHA doesn't invalidate the cached layers above.
+ARG APP_VERSION=unknown
+ENV APP_VERSION=${APP_VERSION}
+
 EXPOSE 3001
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "index.js"]
