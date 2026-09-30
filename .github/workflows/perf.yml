@@ -1,0 +1,78 @@
+name: Perf
+
+# Performance regression test (k6, perf/api.js) against the dev environment. One definition, three uses:
+#   - called by backend.yml / frontend.yml after each dev deploy: waits until dev serves the new version,
+#     then tests; a crossed threshold fails the job and the image is not promoted to prod
+#   - on a change to the test itself (perf/**): tests what dev serves now (no build, deploy or promotion)
+#   - manually (Actions → Perf → Run workflow), e.g. to measure the baseline
+on:
+  workflow_call:
+    inputs:
+      expected-version:
+        description: Version (image tag = short git SHA) that must be live before testing; empty = test what's live now
+        type: string
+        default: ""
+      version-path:
+        description: Path returning {"version":"<sha>"} for the app that was just deployed
+        type: string
+        default: /api/health/live
+    secrets:
+      PERF_USER_PASSWORD:
+        required: true
+  push:
+    branches:
+      - main
+    paths:
+      - "perf/**"
+      - ".github/workflows/perf.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BASE_URL: http://hw-alb-dev-1615673857.us-east-1.elb.amazonaws.com
+
+jobs:
+  k6:
+    runs-on: ubuntu-24.04
+    # Runs of the same caller queue instead of loading dev at the same time. Per caller (Backend,
+    # Frontend, Perf): one shared group would let GitHub cancel a waiting gate (max 1 pending per group).
+    concurrency:
+      group: perf-dev-${{ github.workflow }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # CI has no cluster access (GitOps): it only knows the new tag was committed, so it asks the app itself
+      - name: Wait for the new version
+        if: inputs.expected-version != ''
+        env:
+          URL: ${{ env.BASE_URL }}${{ inputs.version-path }}
+          EXPECTED: ${{ inputs.expected-version }}
+          TIMEOUT: 600
+        run: |
+          set -uo pipefail
+          deadline=$(( $(date +%s) + TIMEOUT )); ok=0
+          # 3 matches in a row: the rollout is finished, not just one new pod answering
+          while [ "$ok" -lt 3 ]; do
+            [ "$(date +%s)" -lt "$deadline" ] || { echo "::error::$URL did not report $EXPECTED within ${TIMEOUT}s"; exit 1; }
+            current=$(curl -fsS -m 5 "$URL" | jq -r '.version' 2>/dev/null || echo "unreachable")
+            if [ "$current" = "$EXPECTED" ]; then ok=$((ok + 1)); else ok=0; echo "live: $current, waiting for $EXPECTED"; fi
+            sleep 10
+          done
+          echo "$URL serves $EXPECTED"
+
+      - name: k6
+        env:
+          PERF_USER_PASSWORD: ${{ secrets.PERF_USER_PASSWORD }}
+        run: |
+          # GitHub runs bash with -e: keep going when k6 fails, so the summary is still written
+          set +e -o pipefail
+          docker run --rm -e BASE_URL -e PERF_USER_PASSWORD \
+            -v "$GITHUB_WORKSPACE/perf:/perf:ro" \
+            grafana/k6:2.3.0@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603 \
+            run --quiet --no-color /perf/api.js 2>&1 | tee k6.log
+          status=$?
+          { echo '### Performance test (k6, dev)'; echo '```'; sed -n '/THRESHOLDS/,$p' k6.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $status

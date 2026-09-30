@@ -59,9 +59,23 @@ jobs:
           image-tag: ${{ needs.ci.outputs.image-tag }}
           deploy-key: ${{ secrets.K8S_ENVS_DEPLOY_KEY }}
 
+  # Performance regression gate on dev (reusable workflow perf.yml): waits until dev serves this version,
+  # then k6; a crossed threshold fails the job and the image is not promoted to prod
+  perf-dev:
+    needs: [ci, deploy-dev]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/perf.yml
+    with:
+      expected-version: ${{ needs.ci.outputs.image-tag }}
+      version-path: /version.json
+    secrets:
+      PERF_USER_PASSWORD: ${{ secrets.PERF_USER_PASSWORD }}
+    permissions:
+      contents: read
+
   # Promotion: copy the SAME image (same digest) from the dev to the prod repository, no rebuild
   promote-prod:
-    needs: [ci, deploy-dev]
+    needs: [ci, perf-dev]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
