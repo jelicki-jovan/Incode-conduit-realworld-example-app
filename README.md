@@ -8,76 +8,95 @@ the Dockerfiles and the **CI pipeline**. The infrastructure and the overall arch
 
 ## CI/CD pipeline
 
+Trunk-based: `main` is the only long-lived branch. Every merge is **built once**, deployed to **dev**, checked
+by a **performance regression test**, and then the **same image** (same digest) is promoted to **prod**.
+
 ```mermaid
 flowchart LR
-  push([push / PR]) --> filter{changed<br/>backend/ or frontend/?}
-  filter --> scan[gitleaks<br/>secret scan]
-  filter --> test[vitest<br/>tests]
-  scan --> build[docker build]
-  test --> build
-  build --> trivy[Trivy<br/>image scan]
-  trivy -->|main only| ecr[push to ECR<br/>OIDC, no keys]
-  ecr --> deploy[bump image tag<br/>in k8s-envs]
-  deploy --> argo([Argo CD<br/>rolls it out])
+  push([push to main]) --> ci[ci: gitleaks, tests,<br/>build once, Trivy]
+  ci -->|image to dev ECR| devdeploy[deploy-dev<br/>bump dev tag]
+  devdeploy --> perf[perf-dev<br/>wait for new version,<br/>k6 on dev]
+  perf -->|thresholds OK| promote[promote-prod<br/>copy image by digest]
+  promote --> proddeploy[deploy-prod<br/>bump prod tag]
+  devdeploy -.-> argodev([Argo CD dev])
+  proddeploy -.-> argoprod([Argo CD prod])
 ```
 
-| Step | What | Fails the pipeline on |
+| Job | What | Fails the pipeline on |
 |---|---|---|
-| **Trigger** | `backend.yml` / `frontend.yml`, path filters: only the app that changed is built | – |
-| **Secret scan** | gitleaks over the commits of the push / pull request | a committed secret |
-| **Tests** | vitest for that app | a failing test |
-| **Build** | Docker Buildx, multi-stage, layer cache in GitHub Actions | a build error |
-| **Image scan** | Trivy on the built image | a **CRITICAL** vulnerability that has a fix |
-| **Push** (main only) | image `hw-<app>-prod:<short commit SHA>` to ECR | – |
-| **Deploy** (main only) | commits the new tag to `k8s-envs`; Argo CD syncs it | a rejected push after 5 retries |
+| **Trigger** | `backend.yml` / `frontend.yml`, path filters: only the app that changed runs | – |
+| **ci** (reusable `app-ci.yml`) | gitleaks over the pushed commits, vitest, Docker build (multi-stage, layer cache), Trivy image scan, push `hw-<app>-dev:<short SHA>` to ECR (main only) | a secret, a failing test, a build error, a **CRITICAL** vulnerability with a fix |
+| **deploy-dev** | commits the new tag to `k8s-envs` (`environments/dev/…`); Argo CD in the dev cluster rolls it out | a rejected push after 5 retries |
+| **perf-dev** (reusable `perf.yml`) | waits until dev reports the new version, then the k6 performance test ([below](#performance-regression-test)) | a crossed threshold, or the version not live within 10 min |
+| **promote-prod** (action `promote-image`) | copies the tested image from the dev to the prod ECR repository **without rebuilding** and checks both digests are identical | a digest mismatch |
+| **deploy-prod** | commits the prod tag to `k8s-envs` (`environments/prod/…`); Argo CD in the prod cluster rolls it out | a rejected push after 5 retries |
 
-- **Pull requests** run the checks (secret scan, tests, build, image scan) but never push or deploy. A newer
-  push to the same PR cancels the running check.
-- **One pipeline, two apps**: `app-ci.yml` is a reusable workflow with inputs `app` and `environment`;
-  `backend.yml` and `frontend.yml` only add the triggers and the deploy job. A new app or environment is a
-  few lines, not a copied pipeline.
-- **Image tags are the commit SHA** and ECR tags are immutable: every running image maps to exactly one commit,
-  and a tag can never be overwritten.
-- **Deploy only after the push succeeded** (`needs: ci`): Argo CD never sees a tag whose image doesn't exist.
-  Backend and frontend deploys are serialized, and a push rejected because the other app just deployed is
-  rebased and retried.
+- **Pull requests** run only `ci` (checks and build, no push, no deploy). A newer push to the same PR cancels
+  the running check.
+- **Build once, promote the same bytes**: prod never gets a rebuilt image; the digest check proves prod runs
+  exactly what passed the tests and the performance gate on dev.
+- **Each step waits for the previous one**: a failure anywhere stops the chain, and prod stays on the
+  previous version.
+- **Every image knows its version**: CI bakes the commit SHA in (`APP_VERSION` build arg); the backend returns
+  it on `/api/health/live`, the frontend serves `/version.json`. That's how CI (which has no cluster access)
+  knows when a rollout is finished, and how anyone can see what's running.
+- **Reusable pieces**: `app-ci.yml` and `perf.yml` are reusable workflows, `deploy-k8s-envs` and
+  `promote-image` composite actions; `backend.yml` and `frontend.yml` only wire them together. Another
+  environment (e.g. staging) is a few lines, not a copied pipeline.
+- **Image tags are the commit SHA** and ECR tags are immutable: every running image maps to exactly one
+  commit. Backend and frontend may deploy at the same time; a rejected `k8s-envs` push is rebased and retried.
+
+### Performance regression test
+
+`perf/api.js` ([k6](https://k6.io/)) runs against **dev** after every dev deploy, before promotion:
+
+- **Scenario**: 5 virtual users for 1 minute, mostly reads like real users of a blog: article list
+  (anonymous and logged in), one article, tags, and a login in ~1 of 10 iterations. A dedicated test user and
+  **100 seed articles** are created once (idempotent), so every run works on the same data volume.
+- **Gate**: p95 per request type (article list < 500 ms, article and tags < 200 ms, login < 300 ms), errors
+  < 1%, checks > 99%. The thresholds are about 2x the p95 measured in CI: normal noise passes, a 2-3x slowdown
+  (e.g. a query without an index) fails and the image is not promoted. The summary is in the job summary.
+- **What it answers**: "is the new version slower than the previous one?" on a small, stable dev environment.
+  It is not a capacity test of prod; that needs a prod-sized environment (staging) and longer load tests.
+- **Also runs on its own** (workflow **Perf**): on changes to `perf/**` and manually (*Run workflow*), testing
+  what dev serves at that moment, without building or deploying anything.
+- Next steps: store every run's results and compare against the median of recent runs (catches gradual
+  slowdowns), trends in Grafana, longer load tests on a prod-sized staging.
 
 ### Access and supply-chain security
 
-- **No AWS keys in GitHub**: the build job gets short-lived credentials through **GitHub OIDC**. The AWS role
-  trusts only this repository's `main` branch (by its immutable repository ID), so pull requests, forks and
-  other branches can't push images. The role ARN in the workflow isn't a secret; the trust policy protects it.
-- **CI never talks to the cluster**: it only pushes an image and a Git commit. Argo CD pulls the change.
-- **One secret**: `K8S_ENVS_DEPLOY_KEY`, an SSH deploy key with write access to `k8s-envs` only, used only by
-  the deploy job on `main`. Not available to pull requests from forks.
-- **Least privilege per job**: the workflow token is read-only; only the build job may request an OIDC token.
-- **Third-party actions pinned to commit SHAs** (not tags, which can be moved to malicious code), with the
-  version as a comment.
+- **No AWS keys in GitHub**: the `ci` and `promote-prod` jobs get short-lived credentials through **GitHub
+  OIDC**. The AWS role trusts only this repository's `main` branch (by its immutable repository ID), so pull
+  requests, forks and other branches can't push images. The role ARN isn't a secret; the trust policy
+  protects it.
+- **CI never talks to the clusters**: it only pushes images and Git commits; Argo CD pulls the changes.
+- **Two secrets**: `K8S_ENVS_DEPLOY_KEY` (SSH deploy key, write access to `k8s-envs` only, used by the deploy
+  jobs) and `PERF_USER_PASSWORD` (the dev test user, passed explicitly to `perf.yml`). Neither is available
+  to pull requests from forks.
+- **Least privilege per job**: the workflow token is read-only; only the jobs that need AWS may request an
+  OIDC token.
+- **Third-party actions and the k6 image pinned** to commit SHAs / image digests (tags can be moved to
+  malicious code), with the version as a comment.
 
-## Release process (suggestion for more environments)
+## Release process: next steps
 
-Today there is one environment and every merge to `main` deploys straight to prod. With a dev environment
-and a team, I'd keep the same **trunk-based** model (one long-lived branch, `main`) and add a reviewed step
-before prod:
+The pipeline above is **continuous deployment**: a change reaches prod automatically once it has passed all
+automated gates. With a team, I'd add:
 
-- **Protected `main`** (app and infrastructure repos): no direct or force pushes; changes only through short-lived
-  branches and pull requests that need at least one approval, all checks passed (secret scan, tests, build,
-  image scan) and the branch up to date. Changes to the CI workflows need a review from the platform team
-  (CODEOWNERS).
-- **Every merge to `main` builds the image once** and deploys it **automatically to dev** (the pipeline bumps
-  the dev tag in `k8s-envs`, as it does for prod today).
-- **Prod is a pull request in `k8s-envs`.** After the dev deploy, the pipeline copies the image **by digest**
-  from the dev ECR repository to the prod one (no new build: prod runs exactly the bytes tested in dev) and
-  opens a pull request that changes only the prod image tag. Merging it, with the required approval, is the
-  release; Argo CD rolls it out. Every prod change is a reviewed Git commit, and a rollback is its revert.
-- **Unfinished work** is merged behind feature flags, so `main` is always releasable.
+- **Protected `main`** (app and infrastructure repos): no direct or force pushes; changes only through
+  short-lived branches and pull requests that need at least one approval, all checks passed and the branch up
+  to date. Changes to the CI workflows need a review from the platform team (CODEOWNERS).
+- **A human approval for prod, if required** (continuous delivery): instead of committing the prod tag,
+  `deploy-prod` opens a **pull request in `k8s-envs`** that changes only the prod image tag. Merging it, with
+  the required approval, is the release. Every prod change stays a reviewed Git commit.
+- **Unfinished work** behind feature flags, so `main` is always releasable.
 - **Hotfix**: if the last release caused it, roll back first (revert the prod tag commit in `k8s-envs`);
-  otherwise a normal small pull request into `main`, through dev and the same prod pull request. No separate
-  hotfix branches and nothing to merge back.
-- **Separate AWS roles per environment**: the CI role can push only to the dev repositories; copying into
-  the prod repositories is a separate role, used only by the promotion step.
-- More stages (e.g. staging) follow the same pattern: another folder in `terraform` and `k8s-envs`, and the
-  same image promoted one step further (dev → staging → prod).
+  otherwise a normal small pull request into `main`, through dev and the same gates. No separate hotfix
+  branches and nothing to merge back.
+- **Separate AWS roles**: today one CI role may push to both dev and prod repositories. Split into a build
+  role (push to dev only) and a promotion role (pull from dev, push to prod), used only by `promote-prod`.
+- More stages (e.g. staging for load tests) follow the same pattern: another folder in `terraform` and
+  `k8s-envs`, another deploy + promote step, the same image promoted one step further.
 
 ## Container images
 
@@ -96,8 +115,9 @@ Both are built from the repo root (the npm workspace lockfile lives there):
 
 Kept small; only what running it in Kubernetes on AWS required:
 
-- **Health endpoints**: `/api/health/live` (process is up; never touches the database, so a short DB outage
-  doesn't restart every pod) and `/api/health/ready` (database reachable; Kubernetes sends traffic only to ready pods).
+- **Health endpoints**: `/api/health/live` (process is up, plus the running version; never touches the
+  database, so a short DB outage doesn't restart every pod) and `/api/health/ready` (database reachable;
+  Kubernetes sends traffic only to ready pods). The frontend serves its version on `/version.json`.
 - **Graceful shutdown**: on SIGTERM the backend fails readiness, finishes in-flight requests and closes the
   database pool before exiting.
 - **Database migrations instead of `sequelize.sync()`**: the original app altered the schema on every pod

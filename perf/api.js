@@ -21,8 +21,6 @@ export const options = {
   // Low and constant on purpose: we measure the code, not the limits of the small dev environment
   vus: 5,
   duration: "1m",
-  // Thresholds = p95 measured in CI (2026-09-30: articles ~190-240 ms, article/tags ~15-90 ms, login
-  // ~90-150 ms) x ~2, a margin for noise: a normal run passes, a 2-3x slowdown (e.g. a missing index) fails.
   // p95 only: p99 is decided by a handful of requests in a 1-minute run, too noisy for a gate.
   thresholds: {
     http_req_failed: ["rate<0.01"],
