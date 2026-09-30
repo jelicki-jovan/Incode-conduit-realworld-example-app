@@ -71,7 +71,7 @@ jobs:
           set +e -o pipefail
           docker run --rm -e BASE_URL -e PERF_USER_PASSWORD \
             -v "$GITHUB_WORKSPACE/perf:/perf:ro" \
-            grafana/k6:2.3.0@sha256:e66db15b860113878fa74670e31f5e274830b7b6e42c8bff28b2f2d86a257603 \
+            grafana/k6:2.3.0@sha256:9c2dee7f8ed74d317e4027c06a10f169b625638189de8d4555d0b3486a5aeb34 \
             run --quiet --no-color /perf/api.js 2>&1 | tee k6.log
           status=$?
           { echo '### Performance test (k6, dev)'; echo '```'; sed -n '/THRESHOLDS/,$p' k6.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

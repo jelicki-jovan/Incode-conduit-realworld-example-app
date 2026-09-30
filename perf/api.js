@@ -21,17 +21,17 @@ export const options = {
   // Low and constant on purpose: we measure the code, not the limits of the small dev environment
   vus: 5,
   duration: "1m",
-  // Provisional, generous thresholds: only big regressions fail. To be tightened to the baseline measured
-  // in CI (the runner's network path differs from a laptop's) plus a margin for noise.
+  // Thresholds = p95 measured in CI (2026-09-30: articles ~190-240 ms, article/tags ~15-90 ms, login
+  // ~90-150 ms) x ~2, a margin for noise: a normal run passes, a 2-3x slowdown (e.g. a missing index) fails.
   // p95 only: p99 is decided by a handful of requests in a 1-minute run, too noisy for a gate.
   thresholds: {
     http_req_failed: ["rate<0.01"],
     checks: ["rate>0.99"],
-    "http_req_duration{name:articles}": ["p(95)<1500"],
-    "http_req_duration{name:articles-auth}": ["p(95)<1500"],
-    "http_req_duration{name:article}": ["p(95)<1000"],
-    "http_req_duration{name:tags}": ["p(95)<1000"],
-    "http_req_duration{name:login}": ["p(95)<1000"],
+    "http_req_duration{name:articles}": ["p(95)<500"],
+    "http_req_duration{name:articles-auth}": ["p(95)<500"],
+    "http_req_duration{name:article}": ["p(95)<200"],
+    "http_req_duration{name:tags}": ["p(95)<200"],
+    "http_req_duration{name:login}": ["p(95)<300"],
   },
   summaryTrendStats: ["med", "p(95)", "p(99)", "max"],
 };
