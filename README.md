@@ -53,9 +53,6 @@ flowchart LR
 - **Scenario**: 5 virtual users for 1 minute, mostly reads like real users of a blog: article list
   (anonymous and logged in), one article, tags, and a login in ~1 of 10 iterations. A dedicated test user and
   **100 seed articles** are created once (idempotent), so every run works on the same data volume.
-- **Gate**: p95 per request type (article list < 500 ms, article and tags < 200 ms, login < 300 ms), errors
-  < 1%, checks > 99%. The thresholds are about 2x the p95 measured in CI: normal noise passes, a 2-3x slowdown
-  (e.g. a query without an index) fails and the image is not promoted. The summary is in the job summary.
 - **What it answers**: "is the new version slower than the previous one?" on a small, stable dev environment.
   It is not a capacity test of prod; that needs a prod-sized environment (staging) and longer load tests.
 - **Also runs on its own** (workflow **Perf**): on changes to `perf/**` and manually (*Run workflow*), testing
@@ -75,8 +72,6 @@ flowchart LR
   to pull requests from forks.
 - **Least privilege per job**: the workflow token is read-only; only the jobs that need AWS may request an
   OIDC token.
-- **Third-party actions and the k6 image pinned** to commit SHAs / image digests (tags can be moved to
-  malicious code), with the version as a comment.
 
 ## Release process: next steps
 
@@ -86,15 +81,10 @@ automated gates. With a team, I'd add:
 - **Protected `main`** (app and infrastructure repos): no direct or force pushes; changes only through
   short-lived branches and pull requests that need at least one approval, all checks passed and the branch up
   to date. Changes to the CI workflows need a review from the platform team (CODEOWNERS).
-- **A human approval for prod, if required** (continuous delivery): instead of committing the prod tag,
-  `deploy-prod` opens a **pull request in `k8s-envs`** that changes only the prod image tag. Merging it, with
-  the required approval, is the release. Every prod change stays a reviewed Git commit.
 - **Unfinished work** behind feature flags, so `main` is always releasable.
 - **Hotfix**: if the last release caused it, roll back first (revert the prod tag commit in `k8s-envs`);
   otherwise a normal small pull request into `main`, through dev and the same gates. No separate hotfix
   branches and nothing to merge back.
-- **Separate AWS roles**: today one CI role may push to both dev and prod repositories. Split into a build
-  role (push to dev only) and a promotion role (pull from dev, push to prod), used only by `promote-prod`.
 - More stages (e.g. staging for load tests) follow the same pattern: another folder in `terraform` and
   `k8s-envs`, another deploy + promote step, the same image promoted one step further.
 
